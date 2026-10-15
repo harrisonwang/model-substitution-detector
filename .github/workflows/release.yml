@@ -1,0 +1,156 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-config:
+    name: validate release configuration
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Validate release version
+        if: github.ref_type == 'tag'
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable version tag: vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+      - name: Validate Homebrew credential
+        if: github.ref_type == 'tag'
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$HOMEBREW_TAP_TOKEN" ]]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+  ci:
+    name: full ci
+    needs: release-config
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: ci
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Set archive version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            echo "VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=dev-${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          fi
+      - name: Build
+        run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package and verify
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="msd_${VERSION}_${TARGET}.tar.gz"
+          mkdir -p package/msd dist verify
+          install -m 755 "target/$TARGET/release/msd" package/msd/msd
+          install -m 644 README.md package/msd/README.md
+          COPYFILE_DISABLE=1 tar -C package -czf "dist/$archive" msd
+          tar -xzf "dist/$archive" -C verify
+          test -x verify/msd/msd
+          actual=$(verify/msd/msd --version)
+          echo "$actual"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$actual" != "msd ${VERSION#v}" ]]; then
+            echo "Binary version does not match tag $VERSION" >&2
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msd_${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: msd_*
+          path: dist
+          merge-multiple: true
+      - name: Verify artifacts and generate checksums
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          files=(*)
+          if [[ ${#files[@]} -ne 3 ]]; then
+            echo "Expected exactly three release archives" >&2
+            exit 1
+          fi
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            test -s "msd_${TAG}_${target}.tar.gz"
+          done
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+  update-homebrew:
+    name: update Homebrew tap
+    if: github.ref_type == 'tag'
+    needs: publish
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Dispatch published version
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+          DISTRIBUTION_REPOSITORY: ${{ github.repository_owner }}/homebrew-tap
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n --arg tag "$TAG" --arg repo "$REPOSITORY" \
+            '{event_type:"tool-released",client_payload:{tool:"msd",tag:$tag,repo:$repo}}' \
+            | gh api --method POST "repos/$DISTRIBUTION_REPOSITORY/dispatches" --input -

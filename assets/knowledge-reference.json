@@ -1,0 +1,504 @@
+{
+  "source": "https://github.com/Ooo0ption/KBF",
+  "license": "Apache-2.0",
+  "selection": "First two probes per domain, preserving upstream order; 30 probes per model. No accuracy claim for this subset.",
+  "collection_note": "Upstream values were selected with cloze_3config_consensus (t0/t07_a/t07_b); current CLI prompts and sampling settings differ. Do not apply upstream self_error or detection thresholds.",
+  "references": [
+    {
+      "model": "gpt-6-astra",
+      "date": "2026-09-10",
+      "upstream_file": "gpt-6-astra_20260910.json",
+      "upstream_sha256": "71227dc426dddb3625bf98da884695f459f5eed7eb11b768784a7c666d94f606",
+      "probes": [
+        {
+          "id": "kbf-0001",
+          "domain": "chemistry_bp",
+          "prompt": "The boiling point of tetramethyltin at 1 atm is ___ degrees Celsius.",
+          "expected": 78.0,
+          "tolerance": 3.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0002",
+          "domain": "chemistry_bp",
+          "prompt": "The boiling point of tetraethyltin at 1 atm is ___ degrees Celsius.",
+          "expected": 181.0,
+          "tolerance": 3.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0034",
+          "domain": "chemistry_mp",
+          "prompt": "The melting point of scandium(iii) oxide is ___ degrees Celsius.",
+          "expected": 2485.0,
+          "tolerance": 5.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0035",
+          "domain": "chemistry_mp",
+          "prompt": "The melting point of thulium(iii) oxide is ___ degrees Celsius.",
+          "expected": 2341.0,
+          "tolerance": 5.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0064",
+          "domain": "physics",
+          "prompt": "The numerical value of specific heat capacity at constant pressure of crystalline boron at 298 k in SI units is ___.",
+          "expected": 1026.0,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0065",
+          "domain": "physics",
+          "prompt": "The numerical value of specific heat capacity at constant pressure of solid germanium at 298 k in SI units is ___.",
+          "expected": 320.0,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0087",
+          "domain": "astronomy",
+          "prompt": "The numerical value of orbital period of caliban in days is ___.",
+          "expected": 579.6167,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0088",
+          "domain": "astronomy",
+          "prompt": "The numerical value of orbital period of stephano in days is ___.",
+          "expected": 677.37,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0143",
+          "domain": "biology",
+          "prompt": "The diploid chromosome number (2n) of ophioglossum reticulatum is ___.",
+          "expected": 1260.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0144",
+          "domain": "biology",
+          "prompt": "The diploid chromosome number (2n) of ophioglossum vulgatum is ___.",
+          "expected": 480.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0183",
+          "domain": "math",
+          "prompt": "The numerical value of partition number p(50), oeis a000041 is ___.",
+          "expected": 204226.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0184",
+          "domain": "math",
+          "prompt": "The numerical value of partition number p(80), oeis a000041 is ___.",
+          "expected": 15796476.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0212",
+          "domain": "programming",
+          "prompt": "first operational deployment of joss on rand's johnniac occurred in the year ___.",
+          "expected": 1963.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0213",
+          "domain": "programming",
+          "prompt": "first release of snobol4 occurred in the year ___.",
+          "expected": 1967.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0260",
+          "domain": "medical",
+          "prompt": "The elimination half-life of gabapentin is ___ hours.",
+          "expected": 6.0,
+          "tolerance": 0.1,
+          "relative": true
+        },
+        {
+          "id": "kbf-0261",
+          "domain": "medical",
+          "prompt": "The elimination half-life of tiagabine is ___ hours.",
+          "expected": 7.0,
+          "tolerance": 0.1,
+          "relative": true
+        },
+        {
+          "id": "kbf-0283",
+          "domain": "pop_culture",
+          "prompt": "The numerical value of worldwide box office of the fountain (2006) in millions usd is ___.",
+          "expected": 16.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0284",
+          "domain": "pop_culture",
+          "prompt": "The numerical value of worldwide box office of seven psychopaths (2012) in millions usd is ___.",
+          "expected": 33.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0326",
+          "domain": "internet_culture",
+          "prompt": "The numerical value of year ask metafilter launched is ___.",
+          "expected": 2003.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0327",
+          "domain": "internet_culture",
+          "prompt": "The numerical value of year meatballwiki was founded is ___.",
+          "expected": 2000.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0373",
+          "domain": "chinese_history",
+          "prompt": "唐玄宗将进士等科的贡举主持权由吏部考功员外郎移交礼部侍郎发生在公元___年。",
+          "expected": 736.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0374",
+          "domain": "chinese_history",
+          "prompt": "宋太祖在礼部贡举后亲自复试贡士，确立殿试作为常制发生在公元___年。",
+          "expected": 973.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0405",
+          "domain": "chinese_geography",
+          "prompt": "澧水干流长度（千米）的数值是___。",
+          "expected": 388.0,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0406",
+          "domain": "chinese_geography",
+          "prompt": "北江干流长度（千米）的数值是___。",
+          "expected": 573.0,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0425",
+          "domain": "chinese_internet",
+          "prompt": "榕树下网站创立年份发生在___年。",
+          "expected": 1997.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0426",
+          "domain": "chinese_internet",
+          "prompt": "北大未名bbs创立年份发生在___年。",
+          "expected": 2000.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0463",
+          "domain": "chinese_literature",
+          "prompt": "丁玲短篇小说《梦珂》首次发表于《小说月报》的年份的数值是___。",
+          "expected": 1927.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0464",
+          "domain": "chinese_literature",
+          "prompt": "叶绍钧小说集《隔膜》首次出版年份的数值是___。",
+          "expected": 1922.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0497",
+          "domain": "crypto_params",
+          "prompt": "The numerical value of shark number of rounds is ___.",
+          "expected": 6.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0498",
+          "domain": "crypto_params",
+          "prompt": "The numerical value of square number of rounds is ___.",
+          "expected": 8.0,
+          "tolerance": 0.0,
+          "relative": false
+        }
+      ]
+    },
+    {
+      "model": "claude-fable-5.1",
+      "date": "2026-09-11",
+      "upstream_file": "claude-fable-5.1_20260911.json",
+      "upstream_sha256": "1f83c441fde3c39e5357f654154b738ca51de52bdf0fa189f335107c3683927f",
+      "probes": [
+        {
+          "id": "kbf-0001",
+          "domain": "chemistry_bp",
+          "prompt": "The boiling point of 1-methylimidazole at 1 atm is ___ degrees Celsius.",
+          "expected": 198.0,
+          "tolerance": 3.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0002",
+          "domain": "chemistry_bp",
+          "prompt": "The boiling point of 1-methylpyrazole at 1 atm is ___ degrees Celsius.",
+          "expected": 127.0,
+          "tolerance": 3.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0039",
+          "domain": "chemistry_mp",
+          "prompt": "The melting point of hafnium carbide is ___ degrees Celsius.",
+          "expected": 3958.0,
+          "tolerance": 5.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0040",
+          "domain": "chemistry_mp",
+          "prompt": "The melting point of tantalum carbide is ___ degrees Celsius.",
+          "expected": 3880.0,
+          "tolerance": 5.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0075",
+          "domain": "physics",
+          "prompt": "The numerical value of refractive index of zinc selenide at 10.6 μm in SI units is ___.",
+          "expected": 2.4028,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0076",
+          "domain": "physics",
+          "prompt": "The numerical value of speed of sound in liquid sodium at 400 k in SI units is ___.",
+          "expected": 2518.6667,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0093",
+          "domain": "astronomy",
+          "prompt": "The numerical value of apparent visual magnitude of rs ophiuchi at quiescence is ___.",
+          "expected": 12.5,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0094",
+          "domain": "astronomy",
+          "prompt": "The numerical value of apparent visual magnitude of ss cygni at minimum is ___.",
+          "expected": 12.4,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0123",
+          "domain": "biology",
+          "prompt": "The diploid chromosome number (2n) of ophioglossum vulgatum is ___.",
+          "expected": 480.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0124",
+          "domain": "biology",
+          "prompt": "The diploid chromosome number (2n) of ophioglossum petiolatum is ___.",
+          "expected": 960.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0152",
+          "domain": "math",
+          "prompt": "The numerical value of ramanujan tau function at 10 is ___.",
+          "expected": -115920.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0153",
+          "domain": "math",
+          "prompt": "The numerical value of dedekind number m(6) is ___.",
+          "expected": 7828354.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0188",
+          "domain": "programming",
+          "prompt": "first release of snobol at bell labs occurred in the year ___.",
+          "expected": 1962.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0189",
+          "domain": "programming",
+          "prompt": "first release of bcpl by martin richards occurred in the year ___.",
+          "expected": 1967.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0216",
+          "domain": "medical",
+          "prompt": "The elimination half-life of valproic acid is ___ hours.",
+          "expected": 12.0,
+          "tolerance": 0.1,
+          "relative": true
+        },
+        {
+          "id": "kbf-0217",
+          "domain": "medical",
+          "prompt": "The elimination half-life of oxcarbazepine is ___ hours.",
+          "expected": 2.0,
+          "tolerance": 0.1,
+          "relative": true
+        },
+        {
+          "id": "kbf-0248",
+          "domain": "pop_culture",
+          "prompt": "The numerical value of worldwide box office of annihilation (2018) in millions usd is ___.",
+          "expected": 43.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0249",
+          "domain": "pop_culture",
+          "prompt": "The numerical value of total episode count of blackadder (all four series, excluding specials) is ___.",
+          "expected": 24.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0280",
+          "domain": "internet_culture",
+          "prompt": "The numerical value of year the everything2 database launched (as everything) is ___.",
+          "expected": 1998.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0281",
+          "domain": "internet_culture",
+          "prompt": "The numerical value of year futaba channel (2chan) imageboard launched is ___.",
+          "expected": 2001.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0309",
+          "domain": "chinese_history",
+          "prompt": "唐武则天首创殿试于洛城殿发生在公元___年。",
+          "expected": 690.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0310",
+          "domain": "chinese_history",
+          "prompt": "唐礼部侍郎取代吏部考功员外郎主持贡举发生在公元___年。",
+          "expected": 736.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0337",
+          "domain": "chinese_geography",
+          "prompt": "乌鲁木齐市区平均海拔（米）的数值是___。",
+          "expected": 800.0,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0338",
+          "domain": "chinese_geography",
+          "prompt": "沈阳市区平均海拔（米）的数值是___。",
+          "expected": 50.0,
+          "tolerance": 0.05,
+          "relative": true
+        },
+        {
+          "id": "kbf-0369",
+          "domain": "chinese_internet",
+          "prompt": "新浪网正式成立年份发生在___年。",
+          "expected": 1998.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0370",
+          "domain": "chinese_internet",
+          "prompt": "猫扑网创立年份发生在___年。",
+          "expected": 1997.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0395",
+          "domain": "chinese_literature",
+          "prompt": "巴金《家》单行本初版年份的数值是___。",
+          "expected": 1933.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0396",
+          "domain": "chinese_literature",
+          "prompt": "老舍《骆驼祥子》开始在《宇宙风》连载年份的数值是___。",
+          "expected": 1936.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0422",
+          "domain": "crypto_params",
+          "prompt": "The numerical value of year the rijndael proposal was submitted to the aes competition is ___.",
+          "expected": 1998.0,
+          "tolerance": 0.0,
+          "relative": false
+        },
+        {
+          "id": "kbf-0423",
+          "domain": "crypto_params",
+          "prompt": "The numerical value of year the camellia cipher was jointly published by ntt and mitsubishi is ___.",
+          "expected": 2000.0,
+          "tolerance": 0.0,
+          "relative": false
+        }
+      ]
+    }
+  ]
+}

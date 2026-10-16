@@ -11,8 +11,12 @@ permissions:
 
 jobs:
   check:
-    name: format and lint
-    runs-on: ubuntu-22.04
+    name: format and lint (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, windows-2022]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -28,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, macos-latest, macos-15-intel]
+        runner: [ubuntu-22.04, macos-latest, macos-15-intel, windows-2022]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

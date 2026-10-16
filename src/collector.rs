@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -137,7 +137,10 @@ impl Collector {
         }
         // 仅枚举功能名称，不输出或保留功能状态及用户配置。
         // 不添加旧版 CLI 可能无法识别的功能开关。
-        let features = metadata_command(&config.binary, &["features", "list"])?;
+        // 预检沿用本次采样的 effort。旧版 CLI 可能不认识桌面应用写入的
+        // 默认 max/ultra，而采样本身会明确覆盖为 low/medium/high/xhigh。
+        let effort = format!("model_reasoning_effort=\"{}\"", config.effort);
+        let features = metadata_command(&config.binary, &["features", "list", "-c", &effort])?;
         let disabled_features = features
             .lines()
             .filter_map(|line| line.split_whitespace().next())
@@ -720,7 +723,7 @@ struct Captured {
     error: Option<String>,
 }
 
-fn metadata_command(binary: &Path, args: &[&str]) -> Result<String> {
+pub(crate) fn metadata_command(binary: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new(binary);
     command.args(args).env("RUST_LOG", "off");
     let captured = run_bounded(command, Vec::new(), Duration::from_secs(10), false)?;
@@ -751,15 +754,10 @@ fn run_bounded(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut child = command.spawn().context("failed to start CLI")?;
-    let stdout = child.stdout.take().context("missing CLI stdout")?;
-    let stderr = child.stderr.take().context("missing CLI stderr")?;
-    let mut stdin = child.stdin.take().context("missing CLI stdin")?;
+    let mut process = crate::process::ChildProcess::spawn(command)?;
+    let stdout = process.child.stdout.take().context("missing CLI stdout")?;
+    let stderr = process.child.stderr.take().context("missing CLI stderr")?;
+    let mut stdin = process.child.stdin.take().context("missing CLI stdin")?;
     let limit_hit = Arc::new(AtomicBool::new(false));
     let tool_seen = Arc::new(AtomicBool::new(false));
     let pipe_failed = Arc::new(AtomicBool::new(false));
@@ -802,11 +800,11 @@ fn run_bounded(
             error = Some("CLI collection timed out".into());
         }
         if error.is_some() {
-            kill_group(&mut child);
-            status = child.wait().ok();
+            process.kill();
+            status = process.child.wait().ok();
             break;
         }
-        match child.try_wait() {
+        match process.child.try_wait() {
             Ok(Some(exit)) => {
                 status = Some(exit);
                 break;
@@ -814,14 +812,14 @@ fn run_bounded(
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(_) => {
                 error = Some("could not observe CLI process status".into());
-                kill_group(&mut child);
-                status = child.wait().ok();
+                process.kill();
+                status = process.child.wait().ok();
                 break;
             }
         }
     }
     // 主进程退出后，后代进程可能仍持有管道。
-    kill_group(&mut child);
+    process.kill();
     // 读取线程可能在子进程退出后才获得调度。使用调用剩余的时间，
     // 超时子进程被终止后，所有读取线程共用一秒清理时间。
     let cleanup_deadline = deadline
@@ -923,23 +921,6 @@ fn read_pipe<R: Read + Send + 'static>(
     rx
 }
 
-fn kill_group(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn kill(pid: i32, signal: i32) -> i32;
-        }
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // 子进程通过 process_group(0) 启动；负 PID 仅指向
-            // 这个新进程组，包括常规派生的后代进程。
-            unsafe {
-                kill(-pid, 9);
-            }
-        }
-    }
-    let _ = child.kill();
-}
-
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -952,12 +933,14 @@ impl Scratch {
             let id = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir()
                 .join(format!("msd-collector-{}-{stamp}-{id}", std::process::id()));
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
             #[cfg(unix)]
-            {
+            let builder = {
                 use std::os::unix::fs::DirBuilderExt;
+                let mut builder = builder;
                 builder.mode(0o700);
-            }
+                builder
+            };
             match builder.create(&path) {
                 Ok(()) => return Ok(Self(path)),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -974,12 +957,13 @@ impl Drop for Scratch {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
     const MODEL: &str = "gpt-6-astra";
     use serde_json::json;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
@@ -1211,6 +1195,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn metadata_failure_exposes_exit_status_without_raw_diagnostics() {
         let directory = Scratch::new().unwrap();
         let binary = directory.0.join("failing-cli");
@@ -1227,6 +1212,7 @@ mod tests {
         assert!(!error.contains("secret-do-not-retain"));
     }
 
+    #[cfg(unix)]
     fn mock(body: &str, timeout_secs: u64) -> (Scratch, Collector) {
         let directory = Scratch::new().unwrap();
         let binary = directory.0.join("codex");
@@ -1246,6 +1232,7 @@ mod tests {
         (directory, collector)
     }
 
+    #[cfg(unix)]
     fn mock_claude(body: &str) -> (Scratch, Collector) {
         let directory = Scratch::new().unwrap();
         let binary = directory.0.join("claude");
@@ -1287,6 +1274,7 @@ cat >/dev/null
     }
 
     #[test]
+    #[cfg(unix)]
     fn claude_collects_final_result_and_response_metadata() {
         let (_directory, collector) = mock_claude(
             r#"
@@ -1305,6 +1293,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"stop_reaso
     }
 
     #[test]
+    #[cfg(unix)]
     fn claude_structured_answers_are_validated() {
         let (_directory, collector) = mock_claude(
             r#"
@@ -1323,6 +1312,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"42"}'
     }
 
     #[test]
+    #[cfg(unix)]
     fn claude_rejects_tools_before_waiting_for_completion() {
         let (_directory, collector) = mock_claude(
             r#"
@@ -1342,6 +1332,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn claude_rejects_failed_missing_and_truncated_results() {
         for event in [
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"42"}]}}"#,
@@ -1362,6 +1353,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn collects_only_schema_final_and_metadata() {
         let (_directory, collector) = mock(
             r#"
@@ -1380,6 +1372,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn free_text_preserves_multiline_output_without_affecting_schema_mode() {
         let (_directory, collector) = mock(
             r#"
@@ -1406,6 +1399,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn free_text_does_not_unwrap_json_and_rejects_tools() {
         let (_directory, collector) = mock(
             "echo '{\"answer\":\"42\"}' > \"$output\"\necho '{\"type\":\"turn.completed\"}'",
@@ -1425,6 +1419,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn rejects_tools_even_with_valid_final_answer() {
         let (_directory, collector) = mock(
             r#"
@@ -1442,6 +1437,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn timeout_kills_children_holding_output_pipes() {
         let (_directory, collector) = mock("sleep 10 &\nwait", 1);
         let result = collector.collect("question");
@@ -1451,6 +1447,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn does_not_fallback_to_reasoning_or_status() {
         let (_directory, collector) = mock(
             "echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"42\"}}'",
@@ -1462,6 +1459,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn output_limit_rejects_run_without_deadlocking() {
         let (_directory, collector) = mock("dd if=/dev/zero bs=65536 count=80 2>/dev/null", 2);
         let result = collector.collect("question");
@@ -1471,6 +1469,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn raw_diagnostics_are_not_returned() {
         let (_directory, collector) = mock(
             "echo 'Authorization: Bearer do-not-retain-this' >&2\nexit 1",
@@ -1496,6 +1495,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn nonfatal_cli_diagnostic_is_not_a_tool_call_or_an_answer() {
         let (_directory, collector) = mock(
             r#"
@@ -1518,6 +1518,7 @@ sleep 10
     }
 
     #[test]
+    #[cfg(unix)]
     fn rerouting_and_fatal_errors_invalidate_even_a_completed_answer() {
         for (event, rerouted) in [
             (

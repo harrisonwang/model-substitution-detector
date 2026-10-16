@@ -73,7 +73,7 @@ fn main() -> ExitCode {
 }
 
 fn detect(model: &str) -> msd::verdict::Report {
-    if !io::stderr().is_terminal() {
+    if !io::stderr().is_terminal() || !enable_progress() {
         return msd::detect::run(model, |_| {});
     }
     thread::scope(|scope| {
@@ -86,6 +86,27 @@ fn detect(model: &str) -> msd::verdict::Report {
         let _ = display.join();
         report
     })
+}
+
+fn enable_progress() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE,
+            SetConsoleMode,
+        };
+        // Windows 10 的传统控制台需要显式启用 ANSI 擦行；不支持时保留最终文本输出。
+        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        let mut mode = 0;
+        unsafe {
+            GetConsoleMode(handle, &mut mode) != 0
+                && SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 fn show_progress(receiver: mpsc::Receiver<msd::detect::Progress>) {

@@ -352,6 +352,7 @@ fn windows_userprofile_is_used_without_home_or_config_overrides() {
         .env_remove("HOME")
         .env_remove("CODEX_HOME")
         .env_remove("CLAUDE_CONFIG_DIR")
+        .env("MSD_APPLICATION_DIRS", fixture.root.join("Applications"))
         .output()
         .unwrap();
     assert!(
@@ -450,4 +451,193 @@ fn app_directory_without_an_executable_is_not_a_sampling_client() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.root.join("Applications/ChatGPT.app")).unwrap();
     assert!(discover(&fixture.paths, "gpt-6-astra").is_empty());
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_store_and_unpacked_desktop_engines_are_discovered() {
+    for relative in [
+        "app/resources/codex.exe",
+        "resources/codex.exe",
+        "Codex/resources/codex.exe",
+        "ChatGPT/resources/codex.exe",
+        "bin/version-hash/codex.exe",
+        "bin/codex.exe",
+    ] {
+        let fixture = Fixture::new();
+        let engine = fixture.paths.applications[0].join(relative);
+        executable(&engine);
+        let clients = discover(&fixture.paths, "gpt-6-astra");
+        assert_eq!(clients.len(), 1, "{relative}");
+        assert_eq!(clients[0].binary, engine);
+        assert_eq!(clients[0].source, Source::ChatGptDesktop);
+        assert!(fixture.observation(Source::ChatGptDesktop).installed);
+        assert!(discover(&fixture.paths, "claude-fable-5.1").is_empty());
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn desktop_gui_executables_are_never_used_as_cli_engines() {
+    let fixture = Fixture::new();
+    for relative in [
+        "Codex.exe",
+        "ChatGPT.exe",
+        "app/Codex.exe",
+        "app/ChatGPT.exe",
+    ] {
+        executable(&fixture.paths.applications[0].join(relative));
+    }
+    assert!(discover(&fixture.paths, "gpt-6-astra").is_empty());
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_desktop_cache_prefers_the_latest_engine_not_the_hash_name() {
+    let fixture = Fixture::new();
+    let root = &fixture.paths.applications[0];
+    let old = root.join("bin/zzz/codex.exe");
+    let new = root.join("bin/aaa/codex.exe");
+    for (path, modified) in [(&old, 1), (&new, 2)] {
+        executable(path);
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(modified)))
+            .unwrap();
+    }
+    let clients = discover(&fixture.paths, "gpt-6-astra");
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].binary, new);
+    let bundled = root.join("app/resources/codex.exe");
+    executable(&bundled);
+    assert_eq!(discover(&fixture.paths, "gpt-6-astra")[0].binary, bundled);
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_npm_codex_resolves_native_binaries_without_invoking_wrappers() {
+    for layout in [
+        "codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe",
+        "codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe",
+        "codex/vendor/x86_64-pc-windows-msvc/codex/codex.exe",
+        "codex/node_modules/@openai/codex-win32-arm64/vendor/aarch64-pc-windows-msvc/codex/codex.exe",
+    ] {
+        let fixture = Fixture::new();
+        let engine = fixture.root.join("bin/node_modules/@openai").join(layout);
+        executable(&engine);
+        executable(&fixture.root.join("bin/codex.cmd"));
+        executable(&fixture.root.join("bin/codex.ps1"));
+        let clients = discover(&fixture.paths, "gpt-6-astra");
+        assert_eq!(clients.len(), 1, "{layout}");
+        assert_eq!(clients[0].binary, engine);
+        assert_eq!(clients[0].source, Source::CodexCli);
+        assert!(fixture.observation(Source::CodexCli).installed);
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_desktop_and_path_alias_preserve_desktop_attribution() {
+    let mut fixture = Fixture::new();
+    let resources = fixture.paths.applications[0].join("app/resources");
+    executable(&resources.join("codex.exe"));
+    fixture.paths.executable_dirs.push(resources);
+    fixture
+        .paths
+        .applications
+        .push(fixture.paths.applications[0].clone());
+    let clients = discover(&fixture.paths, "gpt-6-astra");
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].source, Source::ChatGptDesktop);
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_cache_is_only_used_when_no_bundled_desktop_engine_exists() {
+    let mut fixture = Fixture::new();
+    let bundled = fixture.paths.applications[0].join("app/resources/codex.exe");
+    let cache = fixture.root.join("OpenAI/Codex");
+    let cached = cache.join("bin/hash/codex.exe");
+    executable(&bundled);
+    executable(&cached);
+    fixture.paths.applications.push(cache);
+    fixture
+        .paths
+        .executable_dirs
+        .push(cached.parent().unwrap().into());
+    let clients = discover(&fixture.paths, "gpt-6-astra");
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].binary, bundled);
+    fs::remove_file(bundled).unwrap();
+    let clients = discover(&fixture.paths, "gpt-6-astra");
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0].binary, cached);
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_application_defaults_and_explicit_overrides_are_isolated() {
+    const CHILD: &str = "MSD_TEST_WINDOWS_APPLICATIONS";
+    if let Ok(mode) = std::env::var(CHILD) {
+        let root = PathBuf::from(std::env::var_os("USERPROFILE").unwrap());
+        let paths = LocalPaths::from_env();
+        assert_eq!(paths.codex_home, root.join("custom-codex-home"));
+        if mode == "override" {
+            assert_eq!(
+                paths.applications,
+                vec![root.join("自定义 App"), root.join("second")]
+            );
+        } else {
+            assert!(
+                paths
+                    .applications
+                    .contains(&root.join("Local/OpenAI/Codex"))
+            );
+            assert!(
+                paths
+                    .applications
+                    .contains(&root.join("Local/Programs/ChatGPT"))
+            );
+            assert!(paths.applications.iter().all(|path| path.is_absolute()));
+        }
+        return;
+    }
+    let fixture = Fixture::new();
+    for mode in ["default", "override"] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "windows_application_defaults_and_explicit_overrides_are_isolated",
+            ])
+            .env(CHILD, mode)
+            .env("USERPROFILE", &fixture.root)
+            .env("LOCALAPPDATA", fixture.root.join("Local"))
+            .env("CODEX_HOME", fixture.root.join("custom-codex-home"))
+            // 不查询真实商店应用或读取真实应用目录。
+            .env_remove("SystemRoot")
+            .env_remove("ProgramFiles")
+            .env_remove("ProgramFiles(x86)")
+            .env_remove("MSD_APPLICATION_DIRS");
+        if mode == "override" {
+            command.env(
+                "MSD_APPLICATION_DIRS",
+                std::env::join_paths([
+                    fixture.root.join("自定义 App"),
+                    fixture.root.join("second"),
+                    PathBuf::from("relative"),
+                ])
+                .unwrap(),
+            );
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

@@ -1,0 +1,3 @@
+# Windows 发布包直接携带 CRT，用户无需另装 Visual C++ Redistributable。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

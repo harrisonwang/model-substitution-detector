@@ -82,11 +82,18 @@ impl LocalPaths {
                     .collect()
             })
             .unwrap_or_else(|| {
-                let mut paths = vec![PathBuf::from("/Applications")];
-                if let Some(home) = &home {
-                    paths.push(home.join("Applications"));
+                #[cfg(windows)]
+                {
+                    crate::windows::application_dirs()
                 }
-                paths
+                #[cfg(not(windows))]
+                {
+                    let mut paths = vec![PathBuf::from("/Applications")];
+                    if let Some(home) = &home {
+                        paths.push(home.join("Applications"));
+                    }
+                    paths
+                }
             });
         Self {
             codex_home: directory("CODEX_HOME", ".codex"),
@@ -104,6 +111,7 @@ impl LocalPaths {
 }
 
 pub fn inspect(paths: &LocalPaths) -> Vec<Observation> {
+    let clients = crate::codex::discover(paths, "gpt-");
     let app = |name: &str| paths.applications.iter().any(|dir| dir.join(name).is_dir());
     let binary = |name: &str| {
         paths
@@ -112,8 +120,14 @@ pub fn inspect(paths: &LocalPaths) -> Vec<Observation> {
             .any(|dir| crate::codex::is_executable(&crate::codex::executable_path(dir, name)))
     };
     let mut observations = vec![
-        empty(Source::ChatGptDesktop, app("ChatGPT.app")),
-        empty(Source::CodexCli, binary("codex")),
+        empty(
+            Source::ChatGptDesktop,
+            app("ChatGPT.app") || clients.iter().any(|c| c.source == Source::ChatGptDesktop),
+        ),
+        empty(
+            Source::CodexCli,
+            binary("codex") || clients.iter().any(|c| c.source == Source::CodexCli),
+        ),
         empty(Source::ClaudeDesktopCode, app("Claude.app")),
         empty(Source::ClaudeCli, binary("claude")),
     ];

@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(windows))]
 const EMBEDDED: &str = "ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
 
 #[derive(Debug, Clone)]
@@ -18,6 +19,14 @@ pub fn discover(paths: &LocalPaths, model: &str) -> Vec<Client> {
     let claude = model.starts_with("claude-");
     let mut clients = Vec::new();
     let mut seen = HashSet::new();
+    #[cfg(windows)]
+    let (desktop, aliases) = if claude {
+        (Vec::new(), Vec::new())
+    } else {
+        crate::windows::desktop_binaries(&paths.applications)
+    };
+    #[cfg(windows)]
+    seen.extend(aliases.iter().filter_map(|path| path.canonicalize().ok()));
     let mut add = |source, binary: PathBuf| {
         if is_executable(&binary)
             && let Ok(canonical) = binary.canonicalize()
@@ -27,8 +36,13 @@ pub fn discover(paths: &LocalPaths, model: &str) -> Vec<Client> {
         }
     };
     if !claude {
+        #[cfg(not(windows))]
         for directory in &paths.applications {
             add(Source::ChatGptDesktop, directory.join(EMBEDDED));
+        }
+        #[cfg(windows)]
+        for binary in desktop {
+            add(Source::ChatGptDesktop, binary);
         }
     }
     let (source, name) = if claude {
@@ -38,6 +52,10 @@ pub fn discover(paths: &LocalPaths, model: &str) -> Vec<Client> {
     };
     for directory in &paths.executable_dirs {
         add(source, executable_path(directory, name));
+        #[cfg(windows)]
+        if !claude && let Some(binary) = crate::windows::npm_binary(directory) {
+            add(source, binary);
+        }
     }
     clients
 }
@@ -51,7 +69,7 @@ pub fn find_binary(model: &str) -> Result<PathBuf> {
             if model.starts_with("claude-") {
                 anyhow!("未找到可采样的 Claude 入口；当前支持 PATH 中的 claude")
             } else {
-                anyhow!("未找到 ChatGPT 应用内置引擎或 PATH 中的 codex")
+                anyhow!("未找到 ChatGPT/Codex 桌面应用内置引擎或 PATH 中的 Codex CLI")
             }
         })
 }

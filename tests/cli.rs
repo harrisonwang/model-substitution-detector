@@ -1,9 +1,10 @@
 //! 端到端测试使用临时客户端可执行文件，不调用真实模型。
-#![cfg(unix)]
+mod support;
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,151 +16,15 @@ struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "msd-cli-{}-{}",
+            "msd-cli 空格 &-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
         fs::create_dir(path.join("Applications")).unwrap();
         fs::create_dir(path.join("prompts")).unwrap();
-        let script = r#"#!/bin/sh
-set -eu
-case "$0" in
-    *ChatGPT.app/*) source=desktop; mode=$MSD_DESKTOP_MODE ;;
-    *claude) source=claude; mode=$MSD_MODE ;;
-    *) source=cli; mode=$MSD_CLI_MODE ;;
-esac
-printf '%s:%s\n' "$source" "$1" >> "$MSD_LAUNCHES"
-case "$0" in *claude) claude=1 ;; *) claude=0 ;; esac
-if [ "$1" = '--version' ]; then
-    if [ "$claude" = 1 ]; then echo '2.1.263 (Claude Code)'; else echo 'codex-cli test'; fi
-    exit 0
-fi
-if [ "$1" = 'features' ]; then echo 'shell_tool stable true'; exit 0; fi
-if [ "$1" = '--help' ] || [ "${2-}" = '--help' ]; then
-    if [ "$mode" = 'incompatible' ]; then echo 'unsupported old client'; exit 0; fi
-    echo '--ephemeral --json --output-schema --output-last-message --print --output-format --verbose --tools --safe-mode --strict-mcp-config --mcp-config --no-session-persistence --effort'
-    exit 0
-fi
-if [ "$mode" = 'failure' ]; then
-    printf 'failed\n' >> "$MSD_CALLS"
-    if [ "$claude" = 0 ]; then
-        printf '%s\n' '{"type":"thread.started"}' '{"type":"turn.started"}' '{"type":"item.completed","item":{"type":"error","message":"configuration warning"}}'
-    fi
-    exit 1
-fi
-output=''
-model=''
-structured=0
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --output-last-message) shift; output=$1 ;;
-        --model) shift; model=$1 ;;
-        --output-schema) shift; structured=1 ;;
-        --system-prompt)
-            shift
-            case "$1" in *'exactly one string field named answer'*) structured=1 ;; esac
-            ;;
-    esac
-    shift
-done
-prompt=$(/bin/cat)
-printf '%s' "$prompt" > "$MSD_PROMPTS/$$"
-stage='capability'
-case "$prompt" in
-    *'独立的数值选择记录'*)
-        stage='integer'
-        answer=''
-        i=0
-        while [ "$i" -lt 292 ]; do
-            number=$(( (i * 37 + i * i * 11) % 355 + 1 ))
-            answer="$answer $number"
-            i=$((i + 1))
-        done
-        if [ "$mode" = 'confident' ]; then
-            answer=''
-            i=0
-            while [ "$i" -lt 320 ]; do
-                number=$(( (i * 73 + 19) % 355 + 1 ))
-                answer="$answer $number"
-                i=$((i + 1))
-            done
-        fi
-        ;;
-    *'Closed-book numerical recall'*) stage='knowledge'; answer='2' ;;
-    *'terrarium refrigerator'*) answer='7' ;;
-    *'The quick brown fox jumps'*) answer='fox' ;;
-    *'ZX9-QY7-KP3'*) answer='ZX9-QY7-KP3' ;;
-    *'banana'*) answer='A-N-A-N-A-B' ;;
-    *'print(sum(i * i'*) answer='259' ;;
-    *'2027-02-14'*) answer='星期日' ;;
-    *'岛上只有骑士'*) answer='骑士' ;;
-    *'小于 1000'*) answer='400' ;;
-    *'n 除以 7 余 3'*) answer='654' ;;
-    *) answer='2' ;;
-esac
-if [ "$mode:$stage" = 'confident:knowledge' ]; then
-    case "$prompt" in
-__KNOWLEDGE_ANSWERS__
-        *) exit 91 ;;
-    esac
-fi
-phase='additional'
-case "$prompt" in
-    *'print(sum(i * i'*|*'n 除以 7 余 3'*|*'独立的数值选择记录'*) phase='initial' ;;
-__INITIAL_KNOWLEDGE__
-esac
-printf '%s\n' "$stage" >> "$MSD_CALLS"
-if [ "$mode" = 'tool_event' ]; then
-    printf '%s\n' '{"type":"item.started","item":{"type":"command_execution"}}'
-    exit 0
-fi
-if [ "$mode" = 'model_rerouted' ] || { [ "$mode" = 'late_rerouted' ] && [ "$answer" = '654' ]; }; then
-    printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model rerouted: requested gpt-6-astra, using another model (private-reroute-detail)"}}'
-fi
-if [ "$mode" = 'late_failure' ] && [ "$answer" = '654' ]; then exit 1; fi
-if [ "$mode" = 'bad_capability' ] && [ "$answer" = '654' ]; then answer='wrong'; fi
-if [ "$mode:$phase" = 'additional_failure:additional' ]; then exit 1; fi
-if [ "$mode:$phase" = 'additional_mismatch:additional' ]; then model='gpt-6-luna'; fi
-case "$mode:$stage" in
-    mismatch:*|integer_mismatch:integer|knowledge_mismatch:knowledge|invalid_mismatch:integer)
-        model='gpt-6-luna' ;;
-esac
-if [ "$mode" = 'no_declarations' ]; then model=''; fi
-if [ "$mode" = 'empty_answer' ]; then answer=''; fi
-if [ "$claude" = 1 ]; then
-    if [ "$structured" = 1 ]; then answer="{\\\"answer\\\":\\\"$answer\\\"}"; fi
-        printf '{"type":"assistant","message":{"id":"msg_%s","model":"%s","content":[{"type":"text","text":"%s"}]}}\n' "$$" "$model" "$answer"
-    printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$answer"
-else
-    if [ "$structured" = 1 ]; then answer="{\"answer\":\"$answer\"}"; fi
-    printf '%s\n' "$answer" > "$output"
-        printf 'TRACE SSE event: {"type":"response.completed","response":{"id":"resp_%s","model":"%s","status":"completed"}}\n' "$$" "$model" >&2
-fi
-if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
-"#;
-        let bank: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/knowledge-reference.json")).unwrap();
-        let mut knowledge_answers = String::new();
-        let mut initial_knowledge = String::new();
-        for reference in bank["references"].as_array().unwrap() {
-            for (index, probe) in reference["probes"].as_array().unwrap().iter().enumerate() {
-                let prompt = shell_quote(probe["prompt"].as_str().unwrap());
-                let expected = probe["expected"].as_f64().unwrap();
-                knowledge_answers
-                    .push_str(&format!("        *{prompt}*) answer='{expected}' ;;\n"));
-                if [0, 8, 12, 20].contains(&index) {
-                    initial_knowledge.push_str(&format!("    *{prompt}*) phase='initial' ;;\n"));
-                }
-            }
-        }
-        let script = script
-            .replace("__KNOWLEDGE_ANSWERS__", &knowledge_answers)
-            .replace("__INITIAL_KNOWLEDGE__", &initial_knowledge);
         for name in ["codex", "claude"] {
-            let binary = path.join(name);
-            fs::write(&binary, &script).unwrap();
-            fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
+            support::install_client(&path.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)));
         }
         Self(path)
     }
@@ -172,6 +37,11 @@ if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
         Command::new(env!("CARGO_BIN_EXE_msd"))
             .current_dir(&self.0)
             .env_clear()
+            .envs(
+                ["SystemRoot", "TEMP", "TMP"]
+                    .into_iter()
+                    .filter_map(|key| std::env::var_os(key).map(|value| (key, value))),
+            )
             .env("PATH", &self.0)
             .env("CODEX_HOME", self.0.join("codex-home"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("claude-home"))
@@ -258,21 +128,30 @@ if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
     }
 
     fn install_app_engine(&self, keep_cli: bool) -> PathBuf {
+        #[cfg(not(windows))]
         let engine = self.0.join(
             "Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
         );
+        #[cfg(windows)]
+        let engine = self.0.join("Applications/ChatGPT/resources/codex.exe");
         fs::create_dir_all(engine.parent().unwrap()).unwrap();
         if keep_cli {
-            fs::copy(self.0.join("codex"), &engine).unwrap();
+            fs::copy(
+                self.0
+                    .join(format!("codex{}", std::env::consts::EXE_SUFFIX)),
+                &engine,
+            )
+            .unwrap();
         } else {
-            fs::rename(self.0.join("codex"), &engine).unwrap();
+            fs::rename(
+                self.0
+                    .join(format!("codex{}", std::env::consts::EXE_SUFFIX)),
+                &engine,
+            )
+            .unwrap();
         }
         engine
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 impl Drop for Fixture {
@@ -557,10 +436,17 @@ fn chatgpt_bundled_engine_works_without_a_path_cli() {
 }
 
 #[test]
+#[cfg(unix)]
 fn app_engine_and_symlinked_cli_are_sampled_once() {
     let fixture = Fixture::new();
     let engine = fixture.install_app_engine(false);
-    symlink(engine, fixture.0.join("codex")).unwrap();
+    symlink(
+        engine,
+        fixture
+            .0
+            .join(format!("codex{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
     let output = fixture.run(&["-m", "gpt-6-astra"], "matching");
     assert_summary(&output, "gpt-6-astra ✓", 0);
     fixture.assert_rounds(9, 3, 30);
@@ -800,7 +686,12 @@ fn runtime_failures_are_concise_and_verbose_explains_the_error() {
 #[test]
 fn missing_client_does_not_invoke_another_model_family() {
     let fixture = Fixture::new();
-    fs::remove_file(fixture.0.join("codex")).unwrap();
+    fs::remove_file(
+        fixture
+            .0
+            .join(format!("codex{}", std::env::consts::EXE_SUFFIX)),
+    )
+    .unwrap();
     let output = fixture.run(&["-m", "gpt-6-astra"], "matching");
     assert_summary(&output, "gpt-6-astra ?", 1);
     assert!(fixture.calls().is_empty());

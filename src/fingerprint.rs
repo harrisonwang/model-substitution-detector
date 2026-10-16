@@ -170,6 +170,53 @@ pub struct FingerprintReport {
     pub samples: Vec<FingerprintSample>,
 }
 
+impl FingerprintReport {
+    /// 只用于决定是否继续加测；一致排名不代表模型身份已经验证。
+    pub(crate) fn agrees_with_target(&self) -> bool {
+        if self.valid_samples != ROUNDS
+            || self.samples.len() != ROUNDS
+            || self.requested_rank != Some(1)
+        {
+            return false;
+        }
+        let Some(target) = unique_winner(&self.ranking) else {
+            return false;
+        };
+        self.samples.iter().all(|sample| {
+            if sample.sample.error.is_some() {
+                return false;
+            }
+            let numbers = numbers_from(sample.sample.answer.as_deref().unwrap_or_default());
+            score(&numbers).is_ok_and(|scores| {
+                unique_winner(&scores).is_some_and(|winner| same_label(winner, target))
+            })
+        })
+    }
+}
+
+fn unique_winner(scores: &[Score]) -> Option<&str> {
+    let (index, best) = scores
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.score.total_cmp(&b.score))?;
+    scores
+        .iter()
+        .enumerate()
+        .all(|(other, score)| {
+            score.score.is_finite() && (other == index || best.score > score.score)
+        })
+        .then_some(best.model.as_str())
+}
+
+pub(crate) fn challenges() -> Result<Vec<(String, usize)>> {
+    bank()?;
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    Ok((0..ROUNDS).map(|round| challenge(round, seed)).collect())
+}
+
 /// 通过采集器的限并发采样执行三次独立 CLI 调用。
 /// 样本和报告均不写入磁盘。
 /// 即使请求的模型已收录在库中，排名也仅供辅助参考。
@@ -202,7 +249,7 @@ fn collect_samples(
         .collect()
 }
 
-fn summarize(
+pub(crate) fn summarize(
     samples: Vec<(SampleOutcome, usize)>,
     requested_model: &str,
 ) -> Result<FingerprintReport> {
@@ -557,6 +604,70 @@ mod tests {
     }
 
     #[test]
+    fn three_rounds_must_individually_agree_before_stopping() {
+        let report = summarize(vec![(sample(None), 320); ROUNDS], "gpt-6-astra").unwrap();
+        assert!(report.agrees_with_target());
+
+        let mut differing = sample(None);
+        let numbers: Vec<_> = (0..320).map(|i| (i * 73) % RANGE + 1).collect();
+        differing.answer = Some(
+            numbers
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        assert_ne!(
+            unique_winner(&score(&numbers).unwrap()),
+            Some("gpt-6-astra")
+        );
+        let report = summarize(
+            vec![(sample(None), 320), (sample(None), 320), (differing, 320)],
+            "gpt-6-astra",
+        )
+        .unwrap();
+        assert_eq!(report.requested_rank, Some(1));
+        assert!(!report.agrees_with_target());
+    }
+
+    #[test]
+    fn ties_missing_rounds_and_unknown_targets_do_not_stop() {
+        let mut report = summarize(vec![(sample(None), 320); ROUNDS], "gpt-6-astra").unwrap();
+        report.ranking[1].score = report.ranking[0].score;
+        assert!(!report.agrees_with_target());
+        assert!(
+            unique_winner(&[
+                Score {
+                    model: "first".into(),
+                    score: 1.0
+                },
+                Score {
+                    model: "second".into(),
+                    score: 1.0
+                },
+            ])
+            .is_none()
+        );
+
+        for target in ["claude-fable-5.1", "gpt-6.1-sol", "claude-opus-5.5"] {
+            let report = summarize(vec![(sample(None), 320); ROUNDS], target).unwrap();
+            assert!(!report.agrees_with_target(), "{target}");
+        }
+        let report = summarize(vec![(sample(None), 320); ROUNDS - 1], "gpt-6-astra").unwrap();
+        assert!(!report.agrees_with_target());
+        let report = summarize(
+            vec![
+                (sample(None), 320),
+                (sample(None), 320),
+                (sample(Some("timeout")), 320),
+            ],
+            "gpt-6-astra",
+        )
+        .unwrap();
+        assert!(!report.agrees_with_target());
+    }
+
+    #[test]
     fn failed_and_short_answers_do_not_contribute_to_ranking() {
         let mut short = sample(None);
         short.answer = Some("1, 2, 3".into());
@@ -638,6 +749,12 @@ mod tests {
             let (prompt, count) = challenge(index, 42);
             assert!((292..=332).contains(&count));
             assert_eq!((prompt.clone(), count), challenge(index, 42));
+            assert!(prompt.contains(&count.to_string()));
+        }
+        let generated = challenges().unwrap();
+        assert_eq!(generated.len(), ROUNDS);
+        for (prompt, count) in generated {
+            assert!((292..=332).contains(&count));
             assert!(prompt.contains(&count.to_string()));
         }
     }

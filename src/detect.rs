@@ -92,85 +92,127 @@ fn check_client(
         timeout_secs: 120,
         model: model.into(),
     })?;
-    let (capability, mut samples) = check_capability(&collector, source, &mut |done, total| {
-        progress("能力评测", done, total);
-    })?;
-    let rerouted = samples.iter().any(|sample| sample.model_rerouted);
-    if rerouted || samples.iter().any(|sample| sample.error.is_some()) {
-        let reason = if rerouted {
-            "服务已切换模型"
-        } else {
-            "采集失败"
-        };
-        return Ok(vec![
-            declarations(model, source, &samples),
-            if rerouted && samples.len() == 1 {
-                Finding::new(source, Check::Capability, Status::Skipped, reason)
-            } else {
-                capability
-            },
-            Finding::new(source, Check::Integer, Status::Skipped, reason),
-            Finding::new(source, Check::Knowledge, Status::Skipped, reason),
-        ]);
+    // 已有校准基线必须保持完整题集，不能套用外部参考的初测停止规则。
+    let legacy = model == knowledge::MODEL
+        && !matches!(std::fs::symlink_metadata(".msd/active.json"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    let plan = Plan::new(model, legacy)?;
+    let mut samples = Vec::with_capacity(plan.tasks.len());
+    progress("初测", 0, plan.initial);
+    let first = collect_task(&collector, &plan.tasks[0]);
+    progress("初测", 1, plan.initial);
+    if !first.response_started
+        && !first.model_rerouted
+        && let Some(error) = &first.error
+    {
+        bail!("首次采集失败：{error}");
     }
-    let mut findings = vec![capability];
-    match fingerprint::collect(&collector, model, &mut |done, total| {
-        progress("整数指纹", done, total);
-    }) {
-        Ok(result) => {
-            let error = result
-                .samples
-                .iter()
-                .find_map(|sample| sample.sample.error.clone());
-            let status = if error.is_some() {
-                Status::Error
-            } else if result.valid_samples == 0 {
-                Status::Inconclusive
-            } else {
-                Status::Observation
-            };
-            let mut detail = format!("有效 {}/{} 轮", result.valid_samples, result.samples.len());
-            if let Some(rank) = result.requested_rank {
-                detail.push_str(&format!("，目标排名 {}/{}", rank, result.ranking.len()));
-            } else if result.valid_samples > 0 {
-                detail.push_str("，参考库未覆盖目标");
+    samples.push((0, first));
+    if !should_stop(model, &samples) {
+        collect_tasks(
+            &collector,
+            model,
+            &plan.tasks,
+            1..plan.initial,
+            &mut samples,
+            &mut |done| {
+                progress("初测", done, plan.initial);
+            },
+        );
+    }
+    if !legacy && !should_stop(model, &samples) && !plan.agrees(model, &samples) {
+        // 初测一致只是减少采样的实验规则，不是校准后的模型身份认证。
+        // 所有原题保留，存疑时每批最多追加三题；不重复询问已经测过的题。
+        for start in (plan.initial..plan.tasks.len()).step_by(3) {
+            let end = (start + 3).min(plan.tasks.len());
+            collect_tasks(
+                &collector,
+                model,
+                &plan.tasks,
+                start..end,
+                &mut samples,
+                &mut |done| {
+                    progress("加测", done, plan.tasks.len());
+                },
+            );
+            if should_stop(model, &samples) {
+                break;
             }
-            if let Some(top) = result.ranking.first() {
-                detail.push_str(&format!("，最相似 {}；仅供参考", top.model));
-            }
-            let mut finding = Finding::new(source, Check::Integer, status, detail);
-            finding.error = error;
-            findings.push(finding);
-            samples.extend(result.samples.into_iter().map(|sample| sample.sample));
         }
-        Err(error) => findings.push(Finding::new(
+    }
+
+    let all: Vec<_> = samples.iter().map(|(_, sample)| sample.clone()).collect();
+    let declaration = declarations(model, source, &all);
+    let stopped = should_stop(model, &samples);
+    let reason = match declaration.status {
+        Status::Rerouted => "服务已切换模型",
+        Status::Anomaly => "模型声明不符",
+        _ => "采集失败",
+    };
+    let mut findings = vec![declaration];
+    let capability = plan.samples(Check::Capability, &samples);
+    if capability.len() == 1 && capability[0].1.model_rerouted {
+        findings.push(Finding::new(
+            source,
+            Check::Capability,
+            Status::Skipped,
+            reason,
+        ));
+    } else {
+        let answers: Vec<_> = capability
+            .iter()
+            .map(|(_, sample)| sample.clone())
+            .collect();
+        findings.push(capability_finding(
+            source,
+            capability.iter().map(|(index, _)| &plan.questions[*index]),
+            &answers,
+        ));
+    }
+    let integers = plan.samples(Check::Integer, &samples);
+    if integers.is_empty() {
+        findings.push(Finding::new(
             source,
             Check::Integer,
-            Status::Error,
-            error.to_string(),
-        )),
-    }
-    let failed = samples
-        .iter()
-        .any(|sample| sample.model_rerouted || sample.error.is_some())
-        || findings
-            .iter()
-            .any(|finding| finding.status == Status::Error);
-    let knowledge_result = if failed {
-        Ok(None)
+            Status::Skipped,
+            reason,
+        ));
     } else {
+        match plan.integer_report(model, &samples) {
+            Ok(result) => findings.push(integer_finding(source, result)),
+            Err(error) => findings.push(Finding::new(
+                source,
+                Check::Integer,
+                Status::Error,
+                error.to_string(),
+            )),
+        }
+    }
+    let knowledge_samples = plan.samples(Check::Knowledge, &samples);
+    let knowledge_result = if legacy && !stopped {
         knowledge::check(
             &collector,
             Path::new(".msd"),
             model,
             source,
             &mut |done, total| {
-                progress("知识边界", done, total);
+                progress("知识基线", done, total);
             },
         )
+    } else {
+        Ok(plan
+            .reference
+            .as_ref()
+            .filter(|_| !knowledge_samples.is_empty())
+            .map(|reference| reference.report(knowledge_samples)))
     };
     match knowledge_result {
         Ok(Some(result)) => {
+            if legacy {
+                let mut all = all;
+                all.extend(result.samples.iter().cloned());
+                findings[0] = declarations(model, source, &all);
+            }
             let status = if result.calibrated && result.decision == Decision::BehaviorShift {
                 Status::Anomaly
             } else if result.error.is_some() {
@@ -187,16 +229,13 @@ fn check_client(
             let mut finding = Finding::new(source, Check::Knowledge, status, result.summary);
             finding.error = result.error;
             findings.push(finding);
-            samples.extend(result.samples);
         }
         Ok(None) => findings.push(Finding::new(
             source,
             Check::Knowledge,
             Status::Skipped,
-            if samples.iter().any(|sample| sample.model_rerouted) {
-                "服务已切换模型"
-            } else if failed {
-                "采集失败"
+            if stopped {
+                reason
             } else {
                 "暂无该模型的参考数据"
             },
@@ -208,57 +247,231 @@ fn check_client(
             error.to_string(),
         )),
     }
-    // 汇总所有检测方法的响应元数据，统一检查模型声明。
-    findings.insert(0, declarations(model, source, &samples));
     Ok(findings)
 }
 
-fn check_capability(
-    collector: &Collector,
-    source: &str,
-    progress: &mut dyn FnMut(usize, usize),
-) -> Result<(Finding, Vec<SampleOutcome>)> {
-    let questions = probe::probes()?;
-    let Some(first) = questions.first() else {
-        bail!("能力题库为空");
-    };
-    let mut samples = Vec::with_capacity(questions.len());
-    progress(0, questions.len());
-    // 发起并发请求前先验证连接。模型一旦开始输出，即使答案无效，
-    // 也应计入当前入口的检测结果。
-    let sample = collector.collect_text(&first.prompt_zh);
-    progress(1, questions.len());
-    if !sample.response_started
-        && !sample.model_rerouted
-        && let Some(error) = &sample.error
-    {
-        bail!("首次采集失败：{error}");
-    }
-    let failed = sample.model_rerouted || sample.error.is_some();
-    samples.push(sample);
-    if !failed {
-        let prompts: Vec<_> = questions[1..].iter().map(|q| q.prompt_zh.clone()).collect();
-        samples.extend(
-            collector
-                .collect_text_many(&prompts, &mut |done, _| {
-                    progress(done + 1, questions.len());
-                })
-                .into_iter()
-                .map(|(_, sample)| sample),
-        );
-    }
-    Ok((capability_finding(source, questions, &samples), samples))
+struct Task {
+    check: Check,
+    index: usize,
+    prompt: String,
 }
 
-fn capability_finding(
+struct Plan {
+    tasks: Vec<Task>,
+    initial: usize,
+    questions: &'static [probe::Probe],
+    numbers: Vec<usize>,
+    reference: Option<knowledge::ReferencePlan>,
+}
+
+impl Plan {
+    fn new(model: &str, legacy: bool) -> Result<Self> {
+        let questions = probe::probes()?;
+        // 初测覆盖代码推演与约束推理，尚未按目标/替代模型的样本做区分度校准。
+        let mut capabilities: Vec<_> = (0..questions.len()).collect();
+        capabilities.sort_by_key(|&index| match questions[index].id.as_str() {
+            "code_trace" => (0, 0),
+            "crt" => (1, 0),
+            _ => (2, index),
+        });
+        anyhow::ensure!(capabilities.len() >= 2, "能力题库不足两题");
+        let reference = if legacy {
+            None
+        } else {
+            knowledge::reference_plan(model)?
+        };
+        let order = reference
+            .as_ref()
+            .map_or_else(Vec::new, |reference| reference.order());
+        let (integer_prompts, numbers): (Vec<_>, Vec<_>) =
+            fingerprint::challenges()?.into_iter().unzip();
+        let capability = |index| Task {
+            check: Check::Capability,
+            index,
+            prompt: questions[index].prompt_zh.clone(),
+        };
+        let knowledge = |index| Task {
+            check: Check::Knowledge,
+            index,
+            prompt: reference
+                .as_ref()
+                .expect("knowledge indices require a reference")
+                .prompt(index),
+        };
+        let mut tasks = vec![capability(capabilities[0]), capability(capabilities[1])];
+        // 混合队列共享三个 worker，避免能力、整数、知识各自等上一阶段完成。
+        for (index, prompt) in integer_prompts.into_iter().enumerate() {
+            tasks.push(Task {
+                check: Check::Integer,
+                index,
+                prompt,
+            });
+            if let Some(&index) = order.get(index) {
+                tasks.push(knowledge(index));
+            }
+        }
+        if let Some(&index) = order.get(3) {
+            tasks.push(knowledge(index));
+        }
+        let mut initial = tasks.len();
+        for index in 0..capabilities
+            .len()
+            .saturating_sub(2)
+            .max(order.len().saturating_sub(4))
+        {
+            if let Some(&index) = capabilities.get(index + 2) {
+                tasks.push(capability(index));
+            }
+            if let Some(&index) = order.get(index + 4) {
+                tasks.push(knowledge(index));
+            }
+        }
+        if legacy {
+            initial = tasks.len();
+        }
+        Ok(Self {
+            tasks,
+            initial,
+            questions,
+            numbers,
+            reference,
+        })
+    }
+
+    fn samples(
+        &self,
+        check: Check,
+        samples: &[(usize, SampleOutcome)],
+    ) -> Vec<(usize, SampleOutcome)> {
+        samples
+            .iter()
+            .filter_map(|(index, sample)| {
+                let task = &self.tasks[*index];
+                (task.check == check).then(|| (task.index, sample.clone()))
+            })
+            .collect()
+    }
+
+    fn integer_report(
+        &self,
+        model: &str,
+        samples: &[(usize, SampleOutcome)],
+    ) -> Result<fingerprint::FingerprintReport> {
+        fingerprint::summarize(
+            self.samples(Check::Integer, samples)
+                .into_iter()
+                .map(|(index, sample)| (sample, self.numbers[index]))
+                .collect(),
+            model,
+        )
+    }
+
+    fn agrees(&self, model: &str, samples: &[(usize, SampleOutcome)]) -> bool {
+        let Some(reference) = &self.reference else {
+            return false;
+        };
+        let all: Vec<_> = samples.iter().map(|(_, sample)| sample.clone()).collect();
+        let capability = self.samples(Check::Capability, samples);
+        let knowledge = self.samples(Check::Knowledge, samples);
+        samples.len() >= self.initial
+            && declarations(model, "", &all).status == Status::Clear
+            && capability.len() >= 2
+            && capability.iter().all(|(index, sample)| {
+                probe::judge(
+                    sample.answer.as_deref().unwrap_or_default(),
+                    &self.questions[*index].check,
+                ) == Outcome::Pass
+            })
+            && knowledge.len() >= 4
+            && reference.matches(&knowledge)
+            && self
+                .integer_report(model, samples)
+                .is_ok_and(|report| report.agrees_with_target())
+    }
+}
+
+fn collect_task(collector: &Collector, task: &Task) -> SampleOutcome {
+    if task.check == Check::Knowledge {
+        collector.collect(&task.prompt)
+    } else {
+        collector.collect_text(&task.prompt)
+    }
+}
+
+fn collect_tasks(
+    collector: &Collector,
+    model: &str,
+    tasks: &[Task],
+    range: std::ops::Range<usize>,
+    samples: &mut Vec<(usize, SampleOutcome)>,
+    progress: &mut dyn FnMut(usize),
+) {
+    let start = range.start;
+    let completed = samples.len();
+    let batch = crate::collector::collect_parallel_until(
+        &tasks[range],
+        |task| collect_task(collector, task),
+        |sample| sample_should_stop(model, sample),
+        &mut |done, _| {
+            progress(completed + done);
+        },
+    );
+    samples.extend(
+        batch
+            .into_iter()
+            .map(|(index, sample)| (start + index, sample)),
+    );
+}
+
+fn should_stop(model: &str, samples: &[(usize, SampleOutcome)]) -> bool {
+    samples
+        .iter()
+        .any(|(_, sample)| sample_should_stop(model, sample))
+}
+
+fn sample_should_stop(model: &str, sample: &SampleOutcome) -> bool {
+    sample.error.is_some()
+        || sample.model_rerouted
+        || sample.reported_model.as_deref().is_some_and(|reported| {
+            !reported.trim().is_empty() && !same_declaration(model, reported)
+        })
+}
+
+fn integer_finding(source: &str, result: fingerprint::FingerprintReport) -> Finding {
+    let error = result
+        .samples
+        .iter()
+        .find_map(|sample| sample.sample.error.clone());
+    let status = if error.is_some() {
+        Status::Error
+    } else if result.valid_samples == 0 {
+        Status::Inconclusive
+    } else {
+        Status::Observation
+    };
+    let mut detail = format!("有效 {}/{} 轮", result.valid_samples, result.samples.len());
+    if let Some(rank) = result.requested_rank {
+        detail.push_str(&format!("，目标排名 {}/{}", rank, result.ranking.len()));
+    } else if result.valid_samples > 0 {
+        detail.push_str("，参考库未覆盖目标");
+    }
+    if let Some(top) = result.ranking.first() {
+        detail.push_str(&format!("，最相似 {}；仅供参考", top.model));
+    }
+    let mut finding = Finding::new(source, Check::Integer, status, detail);
+    finding.error = error;
+    finding
+}
+
+fn capability_finding<'a>(
     source: &str,
-    questions: &[probe::Probe],
+    questions: impl IntoIterator<Item = &'a probe::Probe>,
     samples: &[SampleOutcome],
 ) -> Finding {
     let mut passed = 0;
     let mut failed = Vec::new();
     let mut invalid = 0;
-    for (question, sample) in questions.iter().zip(samples) {
+    for (question, sample) in questions.into_iter().zip(samples) {
         let outcome = if sample.error.is_some() {
             Outcome::Unknown
         } else {

@@ -736,6 +736,82 @@ struct ReferenceProbe {
     relative: bool,
 }
 
+/// 仅按领域分散安排采样，未经模型区分度校准，不代表最优或最小题量。
+const REFERENCE_DOMAIN_ORDER: [&str; 15] = [
+    "chemistry_bp",
+    "biology",
+    "programming",
+    "chinese_history",
+    "chemistry_mp",
+    "physics",
+    "astronomy",
+    "math",
+    "medical",
+    "pop_culture",
+    "internet_culture",
+    "chinese_geography",
+    "chinese_internet",
+    "chinese_literature",
+    "crypto_params",
+];
+
+/// 外部知识参考的采样计划；比较结果仍未校准，不能认证模型身份。
+pub(crate) struct ReferencePlan {
+    reference: Reference,
+}
+
+pub(crate) fn reference_plan(model: &str) -> Result<Option<ReferencePlan>> {
+    let Some(reference) = reference_for(model)? else {
+        return Ok(None);
+    };
+    let plan = ReferencePlan { reference };
+    ensure!(plan.order().len() == plan.len(), "知识参考领域顺序不完整");
+    Ok(Some(plan))
+}
+
+impl ReferencePlan {
+    pub(crate) fn len(&self) -> usize {
+        self.reference.probes.len()
+    }
+
+    /// 先覆盖全部 15 个领域，再取各领域第二题；每个领域内保持原题序。
+    pub(crate) fn order(&self) -> Vec<usize> {
+        (0..2)
+            .flat_map(|round| {
+                REFERENCE_DOMAIN_ORDER.iter().filter_map(move |domain| {
+                    self.reference
+                        .probes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, probe)| probe.domain == *domain)
+                        .nth(round)
+                        .map(|(index, _)| index)
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn prompt(&self, index: usize) -> String {
+        reference_prompt(&self.reference.probes[index])
+    }
+
+    /// 仅用于决定是否继续采样；UNKNOWN、失败或任何不匹配均不能提前结束。
+    pub(crate) fn matches(&self, samples: &[(usize, SampleOutcome)]) -> bool {
+        !samples.is_empty()
+            && samples.iter().all(|(index, sample)| {
+                !sample.model_rerouted
+                    && self.reference.probes.get(*index).is_some_and(|probe| {
+                        numeric_answer(sample)
+                            .is_some_and(|answer| reference_matches(probe, answer))
+                    })
+            })
+    }
+
+    pub(crate) fn report(&self, samples: Vec<(usize, SampleOutcome)>) -> CheckReport {
+        compare_reference(&self.reference, samples)
+    }
+}
+
 fn reference_for(model: &str) -> Result<Option<Reference>> {
     let canonical = match model {
         "claude-fable-5-1" => "claude-fable-5.1",
@@ -788,11 +864,15 @@ fn reference_matches(probe: &ReferenceProbe, answer: f64) -> bool {
     }
 }
 
-fn reference_prompts(reference: &Reference) -> Vec<String> {
-    reference.probes.iter().map(|probe| format!(
+fn reference_prompt(probe: &ReferenceProbe) -> String {
+    format!(
         "Closed-book numerical recall. Do not browse or use tools. Return JSON with exactly one string field named answer. Its value must contain only one number without units or separators; use UNKNOWN if uncertain.\n\n{}",
         probe.prompt
-    )).collect()
+    )
+}
+
+fn reference_prompts(reference: &Reference) -> Vec<String> {
+    reference.probes.iter().map(reference_prompt).collect()
 }
 
 fn compare_reference(
@@ -986,6 +1066,86 @@ mod tests {
         for model in ["gpt-6.1-sol", "claude-opus-5.5", "unknown-model"] {
             assert!(reference_for(model).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn reference_plan_covers_domains_before_repeating_and_keeps_original_prompts() {
+        for model in [MODEL, "claude-fable-5.1", "claude-fable-5-1"] {
+            let plan = reference_plan(model).unwrap().unwrap();
+            let order = plan.order();
+            assert_eq!(plan.len(), 30);
+            assert_eq!(&order[..4], &[0, 8, 12, 20]);
+            assert_eq!(
+                order.iter().copied().collect::<BTreeSet<_>>(),
+                (0..30).collect()
+            );
+            for indices in order.as_chunks::<15>().0 {
+                let domains: BTreeSet<_> = indices
+                    .iter()
+                    .map(|index| plan.reference.probes[*index].domain.as_str())
+                    .collect();
+                assert_eq!(domains.len(), 15);
+            }
+            for (first, second) in order[..15].iter().zip(&order[15..]) {
+                assert!(first < second);
+                assert_eq!(
+                    plan.reference.probes[*first].domain,
+                    plan.reference.probes[*second].domain
+                );
+            }
+            for (index, probe) in plan.reference.probes.iter().enumerate() {
+                assert_eq!(
+                    plan.prompt(index),
+                    format!(
+                        "Closed-book numerical recall. Do not browse or use tools. Return JSON with exactly one string field named answer. Its value must contain only one number without units or separators; use UNKNOWN if uncertain.\n\n{}",
+                        probe.prompt
+                    )
+                );
+            }
+        }
+        assert!(reference_plan("gpt-6.1-sol").unwrap().is_none());
+    }
+
+    #[test]
+    fn reference_plan_requires_valid_matching_answers_without_claiming_identity() {
+        let plan = reference_plan(MODEL).unwrap().unwrap();
+        let samples: Vec<_> = plan
+            .order()
+            .into_iter()
+            .take(4)
+            .map(|index| {
+                (
+                    index,
+                    SampleOutcome {
+                        answer: Some(plan.reference.probes[index].expected.to_string()),
+                        reported_model: Some(MODEL.into()),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        assert!(plan.matches(&samples));
+        assert!(!plan.matches(&[]));
+        for answer in [None, Some("UNKNOWN"), Some("NaN"), Some("1e99")] {
+            let mut invalid = samples.clone();
+            invalid[0].1.answer = answer.map(str::to_owned);
+            assert!(!plan.matches(&invalid));
+        }
+        let mut invalid = samples.clone();
+        invalid[0].1.error = Some("fixture timeout".into());
+        assert!(!plan.matches(&invalid));
+        invalid[0].1.error = None;
+        invalid[0].1.model_rerouted = true;
+        assert!(!plan.matches(&invalid));
+        invalid[0].1.model_rerouted = false;
+        invalid[0].0 = plan.len();
+        assert!(!plan.matches(&invalid));
+
+        let report = plan.report(samples);
+        assert!(!report.calibrated);
+        assert_eq!(report.decision, Decision::Inconclusive);
+        assert!(report.summary.contains("已测 4/30，匹配 4/4"));
+        assert_eq!(report.samples.len(), 4);
     }
 
     #[test]

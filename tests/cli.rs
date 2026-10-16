@@ -1,6 +1,7 @@
 //! 端到端测试使用临时客户端可执行文件，不调用真实模型。
 #![cfg(unix)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
@@ -20,6 +21,7 @@ impl Fixture {
         ));
         fs::create_dir(&path).unwrap();
         fs::create_dir(path.join("Applications")).unwrap();
+        fs::create_dir(path.join("prompts")).unwrap();
         let script = r#"#!/bin/sh
 set -eu
 case "$0" in
@@ -62,6 +64,7 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 prompt=$(/bin/cat)
+printf '%s' "$prompt" > "$MSD_PROMPTS/$$"
 stage='capability'
 case "$prompt" in
     *'独立的数值选择记录'*)
@@ -73,6 +76,15 @@ case "$prompt" in
             answer="$answer $number"
             i=$((i + 1))
         done
+        if [ "$mode" = 'confident' ]; then
+            answer=''
+            i=0
+            while [ "$i" -lt 320 ]; do
+                number=$(( (i * 73 + 19) % 355 + 1 ))
+                answer="$answer $number"
+                i=$((i + 1))
+            done
+        fi
         ;;
     *'Closed-book numerical recall'*) stage='knowledge'; answer='2' ;;
     *'terrarium refrigerator'*) answer='7' ;;
@@ -86,16 +98,29 @@ case "$prompt" in
     *'n 除以 7 余 3'*) answer='654' ;;
     *) answer='2' ;;
 esac
+if [ "$mode:$stage" = 'confident:knowledge' ]; then
+    case "$prompt" in
+__KNOWLEDGE_ANSWERS__
+        *) exit 91 ;;
+    esac
+fi
+phase='additional'
+case "$prompt" in
+    *'print(sum(i * i'*|*'n 除以 7 余 3'*|*'独立的数值选择记录'*) phase='initial' ;;
+__INITIAL_KNOWLEDGE__
+esac
 printf '%s\n' "$stage" >> "$MSD_CALLS"
 if [ "$mode" = 'tool_event' ]; then
     printf '%s\n' '{"type":"item.started","item":{"type":"command_execution"}}'
     exit 0
 fi
-if [ "$mode" = 'model_rerouted' ] || { [ "$mode" = 'late_rerouted' ] && [ "$answer" = 'fox' ]; }; then
+if [ "$mode" = 'model_rerouted' ] || { [ "$mode" = 'late_rerouted' ] && [ "$answer" = '654' ]; }; then
     printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model rerouted: requested gpt-6-astra, using another model (private-reroute-detail)"}}'
 fi
-if [ "$mode" = 'late_failure' ] && [ "$answer" = 'fox' ]; then exit 1; fi
-if [ "$mode" = 'bad_capability' ] && [ "$answer" = 'fox' ]; then answer='wrong'; fi
+if [ "$mode" = 'late_failure' ] && [ "$answer" = '654' ]; then exit 1; fi
+if [ "$mode" = 'bad_capability' ] && [ "$answer" = '654' ]; then answer='wrong'; fi
+if [ "$mode:$phase" = 'additional_failure:additional' ]; then exit 1; fi
+if [ "$mode:$phase" = 'additional_mismatch:additional' ]; then model='gpt-6-luna'; fi
 case "$mode:$stage" in
     mismatch:*|integer_mismatch:integer|knowledge_mismatch:knowledge|invalid_mismatch:integer)
         model='gpt-6-luna' ;;
@@ -103,19 +128,37 @@ esac
 if [ "$mode" = 'no_declarations' ]; then model=''; fi
 if [ "$mode" = 'empty_answer' ]; then answer=''; fi
 if [ "$claude" = 1 ]; then
-    if [ "$structured" = 1 ]; then answer='{\"answer\":\"2\"}'; fi
+    if [ "$structured" = 1 ]; then answer="{\\\"answer\\\":\\\"$answer\\\"}"; fi
         printf '{"type":"assistant","message":{"id":"msg_%s","model":"%s","content":[{"type":"text","text":"%s"}]}}\n' "$$" "$model" "$answer"
     printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}\n' "$answer"
 else
-    if [ "$structured" = 1 ]; then answer='{"answer":"2"}'; fi
+    if [ "$structured" = 1 ]; then answer="{\"answer\":\"$answer\"}"; fi
     printf '%s\n' "$answer" > "$output"
         printf 'TRACE SSE event: {"type":"response.completed","response":{"id":"resp_%s","model":"%s","status":"completed"}}\n' "$$" "$model" >&2
 fi
 if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
 "#;
+        let bank: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/knowledge-reference.json")).unwrap();
+        let mut knowledge_answers = String::new();
+        let mut initial_knowledge = String::new();
+        for reference in bank["references"].as_array().unwrap() {
+            for (index, probe) in reference["probes"].as_array().unwrap().iter().enumerate() {
+                let prompt = shell_quote(probe["prompt"].as_str().unwrap());
+                let expected = probe["expected"].as_f64().unwrap();
+                knowledge_answers
+                    .push_str(&format!("        *{prompt}*) answer='{expected}' ;;\n"));
+                if [0, 8, 12, 20].contains(&index) {
+                    initial_knowledge.push_str(&format!("    *{prompt}*) phase='initial' ;;\n"));
+                }
+            }
+        }
+        let script = script
+            .replace("__KNOWLEDGE_ANSWERS__", &knowledge_answers)
+            .replace("__INITIAL_KNOWLEDGE__", &initial_knowledge);
         for name in ["codex", "claude"] {
             let binary = path.join(name);
-            fs::write(&binary, script).unwrap();
+            fs::write(&binary, &script).unwrap();
             fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
         }
         Self(path)
@@ -136,6 +179,7 @@ if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
             .env("MSD_APPLICATION_DIRS", self.0.join("Applications"))
             .env("MSD_CALLS", self.0.join("calls"))
             .env("MSD_LAUNCHES", self.0.join("launches"))
+            .env("MSD_PROMPTS", self.0.join("prompts"))
             .env("MSD_MODE", cli_mode)
             .env("MSD_DESKTOP_MODE", desktop_mode)
             .env("MSD_CLI_MODE", cli_mode)
@@ -158,6 +202,34 @@ if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    fn prompts(&self) -> Vec<String> {
+        fs::read_dir(self.0.join("prompts"))
+            .unwrap()
+            .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect()
+    }
+
+    fn assert_no_repeated_questions(&self, capability: usize, knowledge: usize) {
+        let prompts = self.prompts();
+        let questions: Vec<_> = prompts
+            .iter()
+            .filter(|prompt| !prompt.contains("独立的数值选择记录"))
+            .collect();
+        assert_eq!(questions.len(), capability + knowledge);
+        assert_eq!(
+            questions.iter().copied().collect::<BTreeSet<_>>().len(),
+            questions.len(),
+            "capability or knowledge question was repeated"
+        );
+        assert_eq!(
+            questions
+                .iter()
+                .filter(|prompt| prompt.contains("Closed-book numerical recall"))
+                .count(),
+            knowledge
+        );
     }
 
     fn assert_only_desktop_invoked(&self) {
@@ -197,6 +269,10 @@ if [ "$mode:$stage" = 'invalid_mismatch:integer' ]; then exit 1; fi
         }
         engine
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 impl Drop for Fixture {
@@ -264,6 +340,7 @@ fn supported_models_run_integer_and_knowledge_checks_in_memory() {
         let output = fixture.run(&["-m", model], "matching");
         assert_summary(&output, &format!("{model} ✓"), 0);
         fixture.assert_rounds(9, 3, 30);
+        fixture.assert_no_repeated_questions(9, 30);
         let verbose = fixture.run(&["-m", model, "-v"], "matching");
         let text = String::from_utf8_lossy(&verbose.stdout);
         assert!(verbose.status.success(), "{text}");
@@ -285,19 +362,108 @@ fn supported_models_run_integer_and_knowledge_checks_in_memory() {
 }
 
 #[test]
+fn matching_initial_evidence_finishes_after_nine_calls() {
+    let fixture = Fixture::new();
+    let output = fixture.run(&["-m", "gpt-6-astra", "-v"], "confident");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{text}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_four_checks(&text);
+    assert!(text.trim_end().ends_with("gpt-6-astra ✓"), "{text}");
+    fixture.assert_rounds(2, 3, 4);
+    fixture.assert_no_repeated_questions(2, 4);
+    let prompts = fixture.prompts();
+    for required in ["print(sum(i * i", "n 除以 7 余 3"] {
+        assert!(prompts.iter().any(|prompt| prompt.contains(required)));
+    }
+    let bank: serde_json::Value =
+        serde_json::from_str(include_str!("../assets/knowledge-reference.json")).unwrap();
+    let reference = bank["references"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|reference| reference["model"] == "gpt-6-astra")
+        .unwrap();
+    for index in [0, 8, 12, 20] {
+        let expected = reference["probes"][index]["prompt"].as_str().unwrap();
+        assert!(
+            prompts.iter().any(|prompt| prompt.ends_with(expected)),
+            "missing initial reference {index}"
+        );
+    }
+    assert!(!fixture.0.join(".msd").exists());
+}
+
+#[test]
+fn missing_target_fingerprint_coverage_cannot_end_after_initial_sampling() {
+    for (model, knowledge) in [("gpt-6.1-sol", 0), ("claude-fable-5.1", 30)] {
+        let fixture = Fixture::new();
+        let output = fixture.run(&["-m", model], "confident");
+        assert_summary(&output, &format!("{model} ✓"), 0);
+        fixture.assert_rounds(9, 3, knowledge);
+        fixture.assert_no_repeated_questions(9, knowledge);
+    }
+}
+
+#[test]
+fn additional_sampling_stops_after_the_first_failed_or_mismatched_batch() {
+    for (mode, summary, code) in [
+        ("additional_mismatch", "gpt-6-astra ✗ → gpt-6-luna", 2),
+        ("additional_failure", "gpt-6-astra ?", 1),
+    ] {
+        let fixture = Fixture::new();
+        let output = fixture.run(&["-m", "gpt-6-astra"], mode);
+        assert_summary(&output, summary, code);
+        let count = fixture.calls().len();
+        assert!(
+            (10..=12).contains(&count),
+            "only the stopped batch may be in flight: {count}"
+        );
+        let prompts = fixture.prompts();
+        let questions: Vec<_> = prompts
+            .iter()
+            .filter(|prompt| !prompt.contains("独立的数值选择记录"))
+            .collect();
+        assert_eq!(
+            questions.iter().copied().collect::<BTreeSet<_>>().len(),
+            questions.len()
+        );
+    }
+}
+
+#[test]
 fn declarations_are_checked_across_all_methods() {
     for mode in ["mismatch", "integer_mismatch", "knowledge_mismatch"] {
         let fixture = Fixture::new();
         let expected = "gpt-6-astra ✗ → gpt-6-luna";
         let output = fixture.run(&["-m", "gpt-6-astra"], mode);
         assert_summary(&output, expected, 2);
-        fixture.assert_rounds(9, 3, 30);
+        let initial_calls = fixture.calls().len();
+        if mode == "mismatch" {
+            fixture.assert_rounds(1, 0, 0);
+        } else {
+            assert!((2..=9).contains(&initial_calls));
+            assert!(fixture.calls().iter().any(|stage| stage
+                == if mode == "integer_mismatch" {
+                    "integer"
+                } else {
+                    "knowledge"
+                }));
+        }
         let verbose = fixture.run(&["-m", "gpt-6-astra", "-v"], mode);
         let text = String::from_utf8_lossy(&verbose.stdout);
         assert_four_checks(&text);
         assert_eq!(verbose.status.code(), Some(2), "{text}");
         assert!(text.lines().last().unwrap().ends_with(expected), "{text}");
-        fixture.assert_rounds(18, 6, 60);
+        let additional_calls = fixture.calls().len() - initial_calls;
+        assert!((1..=9).contains(&additional_calls));
+        if mode == "mismatch" {
+            assert_eq!(additional_calls, 1);
+        }
     }
 }
 
@@ -319,6 +485,7 @@ fn invalid_sample_declarations_do_not_become_mismatch_evidence() {
     let output = fixture.run(&["-m", "gpt-6-astra"], "invalid_mismatch");
     assert_summary(&output, "gpt-6-astra ?", 1);
     assert!(fixture.calls().iter().any(|stage| stage == "integer"));
+    assert!(fixture.calls().len() <= 9);
 }
 
 #[test]
@@ -348,18 +515,23 @@ fn explicit_model_reroute_stops_after_one_request_and_keeps_details_private() {
 }
 
 #[test]
-fn later_reroute_keeps_attempted_capability_results_and_skips_remaining_stages() {
+fn later_reroute_keeps_inflight_results_and_stops_before_additional_batches() {
     let fixture = Fixture::new();
     let output = fixture.run(&["-m", "gpt-6-astra", "-v"], "late_rerouted");
     let text = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(2), "{text}");
     assert!(text.contains("能力评测：失败"), "{text}");
-    assert!(text.contains("整数指纹：未运行"), "{text}");
-    assert!(text.contains("知识边界指纹：未运行"), "{text}");
+    assert_four_checks(&text);
     assert!(text.trim_end().ends_with("gpt-6-astra ✗ → ?"), "{text}");
     let calls = fixture.calls();
     assert!((2..=9).contains(&calls.len()));
-    assert!(calls.iter().all(|stage| stage == "capability"));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|stage| stage.as_str() == "capability")
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -519,16 +691,32 @@ fn app_results_and_later_failures_never_switch_to_a_matching_backup() {
         assert_four_checks(&text);
         fixture.assert_only_desktop_invoked();
         match mode {
-            "model_rerouted" | "empty_answer" | "tool_event" => fixture.assert_rounds(1, 0, 0),
+            "mismatch" | "model_rerouted" | "empty_answer" | "tool_event" => {
+                fixture.assert_rounds(1, 0, 0)
+            }
             "late_rerouted" | "late_failure" => {
                 let calls = fixture.calls();
                 assert!((2..=9).contains(&calls.len()), "{calls:?}");
-                assert!(calls.iter().all(|stage| stage == "capability"), "{calls:?}");
+                assert_eq!(
+                    calls
+                        .iter()
+                        .filter(|stage| stage.as_str() == "capability")
+                        .count(),
+                    2
+                );
             }
-            "invalid_mismatch" => {
+            "integer_mismatch" | "knowledge_mismatch" | "invalid_mismatch" => {
                 let calls = fixture.calls();
-                assert!(calls.iter().any(|stage| stage == "integer"), "{calls:?}");
-                assert!(!calls.iter().any(|stage| stage == "knowledge"), "{calls:?}");
+                assert!((2..=9).contains(&calls.len()), "{calls:?}");
+                let expected_stage = if mode == "knowledge_mismatch" {
+                    "knowledge"
+                } else {
+                    "integer"
+                };
+                assert!(
+                    calls.iter().any(|stage| stage == expected_stage),
+                    "{calls:?}"
+                );
             }
             _ => fixture.assert_rounds(9, 3, 30),
         }
@@ -572,7 +760,14 @@ fn runtime_failures_are_concise_and_verbose_explains_the_error() {
             assert_eq!(fixture.calls().len(), 1);
         } else {
             assert!(fixture.calls().len() <= 9);
-            assert!(fixture.calls().iter().all(|stage| stage == "capability"));
+            assert_eq!(
+                fixture
+                    .calls()
+                    .iter()
+                    .filter(|stage| stage.as_str() == "capability")
+                    .count(),
+                2
+            );
         }
         let verbose = fixture.run(&["-m", "gpt-6-astra", "-v"], mode);
         let text = String::from_utf8_lossy(&verbose.stdout);
@@ -589,9 +784,15 @@ fn runtime_failures_are_concise_and_verbose_explains_the_error() {
             assert!(text.contains("知识边界指纹：未运行"), "{text}");
             assert_eq!(fixture.calls().len(), 2);
         } else {
-            assert!(text.contains("整数指纹：未运行"), "{text}");
-            assert!(text.contains("知识边界指纹：未运行"), "{text}");
-            assert!(fixture.calls().iter().all(|stage| stage == "capability"));
+            assert!(fixture.calls().len() <= 18);
+            assert_eq!(
+                fixture
+                    .calls()
+                    .iter()
+                    .filter(|stage| stage.as_str() == "capability")
+                    .count(),
+                4
+            );
         }
     }
 }

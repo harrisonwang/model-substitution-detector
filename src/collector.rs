@@ -369,9 +369,18 @@ impl Collector {
     }
 }
 
-fn collect_parallel(
-    prompts: &[String],
-    collect: impl Fn(&str) -> SampleOutcome + Sync,
+pub(crate) fn collect_parallel<T: Sync>(
+    prompts: &[T],
+    collect: impl Fn(&T) -> SampleOutcome + Sync,
+    progress: &mut dyn FnMut(usize, usize),
+) -> Vec<(usize, SampleOutcome)> {
+    collect_parallel_until(prompts, collect, |_| false, progress)
+}
+
+pub(crate) fn collect_parallel_until<T: Sync>(
+    prompts: &[T],
+    collect: impl Fn(&T) -> SampleOutcome + Sync,
+    stop: impl Fn(&SampleOutcome) -> bool + Sync,
     progress: &mut dyn FnMut(usize, usize),
 ) -> Vec<(usize, SampleOutcome)> {
     progress(0, prompts.len());
@@ -385,6 +394,7 @@ fn collect_parallel(
             let sender = sender.clone();
             let dispatch = &dispatch;
             let collect = &collect;
+            let stop = &stop;
             scope.spawn(move || {
                 loop {
                     let index = {
@@ -397,7 +407,7 @@ fn collect_parallel(
                         index
                     };
                     let sample = collect(&prompts[index]);
-                    if sample.error.is_some() || sample.model_rerouted {
+                    if sample.error.is_some() || sample.model_rerouted || stop(&sample) {
                         dispatch.lock().expect("collector dispatch lock poisoned").1 = true;
                     }
                     if sender.send((index, sample)).is_err() {
@@ -1063,10 +1073,65 @@ mod tests {
     }
 
     #[test]
+    fn parallel_collection_stops_on_valid_model_mismatch_without_invalidating_samples() {
+        use std::sync::{Barrier, Condvar};
+        let jobs: Vec<_> = (0..10).collect();
+        let barrier = Barrier::new(3);
+        let gate = (Mutex::new(false), Condvar::new());
+        let mut updates = Vec::new();
+        let samples = collect_parallel_until(
+            &jobs,
+            |index| {
+                assert!(*index < 3, "new work was dispatched after model mismatch");
+                barrier.wait();
+                if *index != 0 {
+                    let mut released = gate.0.lock().unwrap();
+                    while !*released {
+                        released = gate.1.wait(released).unwrap();
+                    }
+                }
+                SampleOutcome {
+                    answer: Some(index.to_string()),
+                    reported_model: Some(if *index == 0 { "gpt-6.1-sol" } else { MODEL }.into()),
+                    ..Default::default()
+                }
+            },
+            |sample| {
+                sample.error.is_none()
+                    && sample
+                        .reported_model
+                        .as_deref()
+                        .is_some_and(|model| model != MODEL)
+            },
+            &mut |completed, total| {
+                updates.push((completed, total));
+                if completed == 1 {
+                    *gate.0.lock().unwrap() = true;
+                    gate.1.notify_all();
+                }
+            },
+        );
+        assert_eq!(updates, vec![(0, 10), (1, 10), (2, 10), (3, 10)]);
+        assert_eq!(samples.len(), 3);
+        for (expected, (index, sample)) in samples.iter().enumerate() {
+            assert_eq!(*index, expected);
+            assert_eq!(
+                sample.answer.as_deref(),
+                Some(expected.to_string().as_str())
+            );
+            assert!(sample.error.is_none());
+            assert!(!sample.model_rerouted);
+        }
+        assert_eq!(samples[0].1.reported_model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(samples[1].1.reported_model.as_deref(), Some(MODEL));
+        assert_eq!(samples[2].1.reported_model.as_deref(), Some(MODEL));
+    }
+
+    #[test]
     fn parallel_collection_handles_empty_and_single_prompt_batches() {
         let mut updates = Vec::new();
         let empty = collect_parallel(
-            &[],
+            &[] as &[String],
             |_| panic!("no requests expected"),
             &mut |done, total| updates.push((done, total)),
         );
@@ -1074,7 +1139,7 @@ mod tests {
         assert_eq!(updates, vec![(0, 0)]);
         updates.clear();
         let samples = collect_parallel(
-            &["one".into()],
+            &[String::from("one")],
             |prompt| SampleOutcome {
                 answer: Some(prompt.into()),
                 ..Default::default()
@@ -1084,6 +1149,35 @@ mod tests {
         assert_eq!(updates, vec![(0, 1), (1, 1)]);
         assert_eq!(samples[0].0, 0);
         assert_eq!(samples[0].1.answer.as_deref(), Some("one"));
+    }
+
+    #[test]
+    fn parallel_collection_preserves_mixed_task_types_and_indices() {
+        enum Job {
+            Text(&'static str),
+            Structured(u32),
+        }
+        let jobs = [Job::Text("first"), Job::Structured(42), Job::Text("third")];
+        let samples = collect_parallel(
+            &jobs,
+            |job| SampleOutcome {
+                answer: Some(match job {
+                    Job::Text(text) => (*text).into(),
+                    Job::Structured(number) => json!({"answer": number.to_string()}).to_string(),
+                }),
+                ..Default::default()
+            },
+            &mut |_, _| {},
+        );
+        assert_eq!(samples.len(), jobs.len());
+        for (expected_index, ((index, sample), expected)) in samples
+            .iter()
+            .zip(["first", r#"{"answer":"42"}"#, "third"])
+            .enumerate()
+        {
+            assert_eq!(*index, expected_index);
+            assert_eq!(sample.answer.as_deref(), Some(expected));
+        }
     }
 
     #[test]
